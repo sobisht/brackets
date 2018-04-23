@@ -25,19 +25,15 @@
 /*jslint node: true */
 "use strict";
 
-var app = require("express")();
-var http = require("http").Server(app);
-app.get("/", function(req, res){
-    res.send("Server started");
-});
-var SocketIOServer =  require("socket.io"),
+var WebSocketServer = require("ws").Server,
     _ = require("lodash");
+
 /**
  * @private
  * The WebSocket server we listen for incoming connections on.
- * @type {?SocketIOServer}
+ * @type {?WebSocketServer}
  */
-var _socketioServer;
+var _wsServer;
 
 /**
  * @private
@@ -56,33 +52,37 @@ var _nextClientId = 1;
 /**
  * @private
  * A map of client IDs to the URL and WebSocket for the given ID.
- * @type {Object.<number, {id: number, url: string, socket: SocketIO}>}
+ * @type {Object.<number, {id: number, url: string, socket: WebSocket}>}
  */
 var _clients = {};
+
+// This must match the port declared in NodeSocketTransport.js.
+// TODO: randomize this?
+var SOCKET_PORT = 8123;
 
 /**
  * @private
  * Returns the client info for a given WebSocket, or null if that socket isn't registered.
- * @param {SocketIO} socketIO
- * @return {?{id: number, url: string, socket: SocketIO}}
+ * @param {WebSocket} ws
+ * @return {?{id: number, url: string, socket: WebSocket}}
  */
-function _clientForSocket(socketIO) {
+function _clientForSocket(ws) {
     return _.find(_clients, function (client) {
-        return (client.socket === socketIO);
+        return (client.socket === ws);
     });
 }
 
 /**
  * @private
- * Creates the SocketIOServer and handles incoming connections.
+ * Creates the WebSocketServer and handles incoming connections.
  */
-function _createServer(socketPort) {
-    if (!_socketioServer) {
-        _socketioServer = new SocketIOServer(http);
-        http.listen(socketPort);
-        _socketioServer.on("connection", function (socket) {
-            socket.on("message", function (msg) {
-                console.log("SocketIOServer - received - " + msg);
+function _createServer() {
+    if (!_wsServer) {
+        // TODO: make port configurable, or use random port
+        _wsServer = new WebSocketServer({port: SOCKET_PORT});
+        _wsServer.on("connection", function (ws) {
+            ws.on("message", function (msg) {
+                console.log("WebSocketServer - received - " + msg);
                 var msgObj;
                 try {
                     msgObj = JSON.parse(msg);
@@ -103,12 +103,12 @@ function _createServer(socketPort) {
                     _clients[clientId] = {
                         id: clientId,
                         url: msgObj.url,
-                        socket: socket
+                        socket: ws
                     };
                     console.log("emitting connect event");
                     _domainManager.emitEvent("nodeSocketTransport", "connect", [clientId, msgObj.url]);
                 } else if (msgObj.type === "message") {
-                    var client = _clientForSocket(socket);
+                    var client = _clientForSocket(ws);
                     if (client) {
                         _domainManager.emitEvent("nodeSocketTransport", "message", [client.id, msgObj.message]);
                     } else {
@@ -119,10 +119,10 @@ function _createServer(socketPort) {
                 }
             }).on("error", function (e) {
                 // TODO: emit error event
-                var client = _clientForSocket(socket);
+                var client = _clientForSocket(ws);
                 console.error("nodeSocketTransport: Error on socket for client " + JSON.stringify(client) + ": " + e);
-            }).on("disconnect", function () {
-                var client = _clientForSocket(socket);
+            }).on("close", function () {
+                var client = _clientForSocket(ws);
                 if (client) {
                     _domainManager.emitEvent("nodeSocketTransport", "close", [client.id]);
                     delete _clients[client.id];
@@ -141,8 +141,8 @@ function _createServer(socketPort) {
  * Initializes the socket server.
  * @param {string} url
  */
-function _cmdStart(socketPort) {
-    _createServer(socketPort);
+function _cmdStart(url) {
+    _createServer();
 }
 
 /**
@@ -159,7 +159,7 @@ function _cmdSend(idOrArray, msgStr) {
         if (!client) {
             console.error("nodeSocketTransport: Couldn't find client ID: " + id);
         } else {
-            client.socket.send({data: msgStr});
+            client.socket.send(msgStr);
         }
     });
 }
@@ -190,10 +190,7 @@ function init(domainManager) {
         "start",       // command name
         _cmdStart,     // command handler function
         false,          // this command is synchronous in Node
-        "Creates the SocketIO server",
-        [
-             {name: "socketPort", type: "number", description: "Port number of live preview page connecting to live development"}
-        ],
+        "Creates the WS server",
         []
     );
     domainManager.registerCommand(
